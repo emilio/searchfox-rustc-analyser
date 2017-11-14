@@ -1,49 +1,184 @@
 extern crate rls_analysis as analysis;
+extern crate rls_data as data;
 #[macro_use]
 extern crate clap;
 extern crate serde;
-extern crate serde_json;
 #[macro_use]
-extern crate serde_derive;
+extern crate serde_json;
 
 mod loader;
 
 use loader::Loader;
-use std::collections::HashSet;
-use std::fs::File;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::io;
+use std::fs::{self, File};
 
-type Host = analysis::AnalysisHost<Loader>;
-
-fn collect_files(id: analysis::Id, host: &Host, files: &mut HashSet<PathBuf>) {
-    each_def_from(id, host, &mut |id, def| {
-        files.insert(def.span.file.clone());
-    });
+// Searchfox uses 1-indexed lines, 0-indexed columns.
+fn span_to_string(span: &data::SpanData) -> String {
+    // Rust spans are multi-line... So we just set the start column if it spans
+    // multiple rows, searchfox has fallback code to handle this.
+    if span.line_start != span.line_end {
+        return format!("{}:{}", span.line_start.0, span.column_start.0 - 1);
+    }
+    if span.column_start == span.column_end {
+        return format!("{}:{}", span.line_start.0, span.column_start.0 - 1);
+    }
+    let len = span.column_end.0 - span.column_end.0;
+    format!("{}:{}-{}", span.line_start.0, span.column_start.0 - 1, len)
 }
 
-fn each_def_from<F>(id: analysis::Id, host: &Host, f: &mut F)
-where
-    F: FnMut(analysis::Id, &analysis::Def),
-{
-    let childs = host.for_each_child_def(id, |child_id, def| {
-        f(child_id, def);
-        child_id
-    });
+fn visit(
+    file: &mut File,
+    kind: &'static str,
+    location: &data::SpanData,
+    qualname: &str,
+    context: Option<&str>,
+) {
+    use serde_json::map::Map;
+    use serde_json::value::Value;
+    use std::io::Write;
 
-    if let Ok(childs) = childs {
-        for child_id in childs {
-            each_def_from(child_id, host, f);
+    let mut out = Map::new();
+    out.insert("loc".into(), Value::String(span_to_string(location)));
+    out.insert("target".into(), json!(1));
+    out.insert("kind".into(), Value::String(kind.into()));
+    out.insert("pretty".into(), Value::String(qualname.into()));
+    out.insert("sym".into(), Value::String(qualname.into()));
+    if let Some(context) = context {
+        out.insert("context".into(), Value::String(context.into()));
+        out.insert("contextsym".into(), Value::String(context.into()));
+    }
+
+    let object = serde_json::to_string(&Value::Object(out)).unwrap();
+    file.write_all(object.as_bytes()).unwrap();
+    write!(file, "\n").unwrap();
+
+    let mut out = Map::new();
+    out.insert("loc".into(), Value::String(span_to_string(location)));
+    out.insert("source".into(), json!(1));
+    out.insert("kind".into(), Value::String(kind.into()));
+    out.insert("pretty".into(), Value::String(qualname.into()));
+    out.insert("sym".into(), Value::String(qualname.into()));
+
+    let object = serde_json::to_string(&Value::Object(out)).unwrap();
+    file.write_all(object.as_bytes()).unwrap();
+    write!(file, "\n").unwrap();
+}
+
+fn analyze_file(
+    file_name: &PathBuf,
+    defs: &HashMap<data::Id, data::Def>,
+    file_analysis: &data::Analysis,
+    src_dir: &Path,
+    output_dir: &Path,
+) {
+    let file = match file_name.strip_prefix(src_dir) {
+        Ok(f) => f,
+        Err(..) => {
+            eprintln!("File not in the source directory: {}", file_name.display());
+            return;
         }
+    };
+
+    let output_file = output_dir.join(file);
+    let mut output_dir = output_file.clone();
+    output_dir.pop();
+    if let Err(err) = fs::create_dir_all(output_dir) {
+        eprintln!("Couldn't create dir for: {}, {:?}", output_file.display(), err);
+        return;
+    }
+    let mut file = match File::create(&output_file) {
+        Ok(f) => f,
+        Err(err) => {
+            eprintln!("Couldn't open output file: {}, {:?}", output_file.display(), err);
+            return;
+        }
+    };
+
+    for import in &file_analysis.imports {
+        let id = match import.ref_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let def = match defs.get(&id) {
+            Some(def) => def,
+            None => continue,
+        };
+
+        visit(
+            &mut file,
+            "import",
+            &import.span,
+            &def.qualname,
+            None
+        )
+    }
+
+    for def in &file_analysis.defs {
+        let parent = def.parent.and_then(|parent_id| {
+            defs.get(&parent_id).map(|d| &*d.qualname)
+        });
+
+        visit(
+            &mut file,
+            "def",
+            &def.span,
+            &def.qualname,
+            parent
+        )
+    }
+
+    for ref_ in &file_analysis.refs {
+        let def = match defs.get(&ref_.ref_id) {
+            Some(d) => d,
+            None => continue,
+        };
+        visit(
+            &mut file,
+            "use",
+            &ref_.span,
+            &def.qualname,
+            /* context = */ None, // TODO
+        )
     }
 }
 
-fn dump_symbol(
-    file: &mut File,
-    symbol: &analysis::SymbolResult,
-    def: &analysis::Def,
-) -> Result<(), io::Error> {
-    unimplemented!();
+fn analyze_crate(
+    analysis: &data::Analysis,
+    defs: &HashMap<data::Id, data::Def>,
+    src_dir: &Path,
+    output_dir: &Path,
+) {
+    let mut per_file = HashMap::new();
+
+
+    macro_rules! flat_map_per_file {
+        ($field:ident) => {
+            for item in &analysis.$field {
+                let mut file_analysis =
+                    per_file.entry(item.span.file_name.clone())
+                        .or_insert_with(|| {
+                            data::Analysis::new(analysis.config.clone())
+                        });
+                file_analysis.$field.push(item.clone());
+            }
+        }
+    }
+
+    flat_map_per_file!(imports);
+    flat_map_per_file!(defs);
+    flat_map_per_file!(impls);
+    flat_map_per_file!(refs);
+    flat_map_per_file!(macro_refs);
+    flat_map_per_file!(relations);
+
+    for (mut name, analysis) in per_file.drain() {
+        if name.is_relative() {
+            name = src_dir.join(name);
+        }
+        analyze_file(&name, defs, &analysis, src_dir, output_dir);
+    }
 }
 
 fn main() {
@@ -62,58 +197,20 @@ fn main() {
     let loader = Loader::new(PathBuf::from(input_dir));
 
 
-    if false {
-        let crates = analysis::read_analysis_from_files(
-            &loader,
-            Default::default(),
-            &[],
-        );
+    let crates = analysis::read_analysis_from_files(
+        &loader,
+        Default::default(),
+        &[],
+    );
 
-        println!("{:?}", crates);
-    }
-
-    let host = analysis::AnalysisHost::new_with_loader(loader);
-    host.reload(src_dir.clone(), src_dir.clone()).unwrap();
-
-    let roots = host.def_roots().unwrap();
-    let mut files = HashSet::new();
-    for &(root_id, ref name) in &roots {
-        collect_files(root_id, &host, &mut files);
-    }
-
-    for file in files {
-        let symbols = match host.symbols(&file) {
-            Ok(symbols) => symbols,
-            Err(..) => {
-                eprintln!("Couldn't find symbols for {}", file.display());
-                continue;
-            }
-        };
-
-        let stripped_file = match file.strip_prefix(&src_dir) {
-            Ok(stripped) => stripped,
-            Err(err) => {
-                eprintln!("File wasn't in the source dir: {}", file.display());
-                continue;
-            }
-        };
-
-        let dest = output_dir.join(&stripped_file);
-        let mut out = match File::create(dest) {
-            Ok(out) => out,
-            Err(err) => {
-                eprintln!("Couldn't create destination file: {:?}", err);
-                continue;
-            }
-        };
-
-        for symbol in symbols {
-            let def =
-                host.get_def(symbol.id).expect("Symbol without definition?");
-
-            if dump_symbol(&mut out, &symbol, &def).is_err() {
-                eprintln!("Couldn't dump: {:?}, {:?}", symbol, def);
-            }
+    let mut defs = HashMap::new();
+    for krate in &crates {
+        for def in &krate.analysis.defs {
+            defs.insert(def.id, def.clone());
         }
+    }
+
+    for krate in crates {
+        analyze_crate(&krate.analysis, &defs, &src_dir, &output_dir);
     }
 }
