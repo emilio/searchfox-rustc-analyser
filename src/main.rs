@@ -1,12 +1,18 @@
 extern crate rls_analysis as analysis;
 #[macro_use]
 extern crate clap;
+extern crate serde;
+extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 
 mod loader;
 
 use loader::Loader;
 use std::collections::HashSet;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::io;
 
 type Host = analysis::AnalysisHost<Loader>;
 
@@ -30,6 +36,14 @@ where
             each_def_from(child_id, host, f);
         }
     }
+}
+
+fn dump_symbol(
+    file: &mut File,
+    symbol: &analysis::SymbolResult,
+    def: &analysis::Def,
+) -> Result<(), io::Error> {
+    unimplemented!();
 }
 
 fn main() {
@@ -67,5 +81,39 @@ fn main() {
         collect_files(root_id, &host, &mut files);
     }
 
-    println!("{:?}", files);
+    for file in files {
+        let symbols = match host.symbols(&file) {
+            Ok(symbols) => symbols,
+            Err(..) => {
+                eprintln!("Couldn't find symbols for {}", file.display());
+                continue;
+            }
+        };
+
+        let stripped_file = match file.strip_prefix(&src_dir) {
+            Ok(stripped) => stripped,
+            Err(err) => {
+                eprintln!("File wasn't in the source dir: {}", file.display());
+                continue;
+            }
+        };
+
+        let dest = output_dir.join(&stripped_file);
+        let mut out = match File::create(dest) {
+            Ok(out) => out,
+            Err(err) => {
+                eprintln!("Couldn't create destination file: {:?}", err);
+                continue;
+            }
+        };
+
+        for symbol in symbols {
+            let def =
+                host.get_def(symbol.id).expect("Symbol without definition?");
+
+            if dump_symbol(&mut out, &symbol, &def).is_err() {
+                eprintln!("Couldn't dump: {:?}, {:?}", symbol, def);
+            }
+        }
+    }
 }
