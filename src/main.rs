@@ -1,7 +1,7 @@
-extern crate rls_analysis as analysis;
-extern crate rls_data as data;
 #[macro_use]
 extern crate clap;
+extern crate rls_analysis as analysis;
+extern crate rls_data as data;
 extern crate serde;
 #[macro_use]
 extern crate serde_json;
@@ -23,7 +23,9 @@ impl Loader {
 }
 
 impl AnalysisLoader for Loader {
-    fn needs_hard_reload(&self, _: &Path) -> bool { true }
+    fn needs_hard_reload(&self, _: &Path) -> bool {
+        true
+    }
 
     fn fresh_host(&self) -> AnalysisHost<Self> {
         AnalysisHost::new_with_loader(self.clone())
@@ -31,7 +33,9 @@ impl AnalysisLoader for Loader {
 
     fn set_path_prefix(&mut self, _: &Path) {}
 
-    fn abs_path_prefix(&self) -> Option<PathBuf> { None }
+    fn abs_path_prefix(&self) -> Option<PathBuf> {
+        None
+    }
     fn search_directories(&self) -> Vec<PathBuf> {
         vec![self.deps_dir.clone()]
     }
@@ -108,13 +112,21 @@ fn analyze_file(
     let mut output_dir = output_file.clone();
     output_dir.pop();
     if let Err(err) = fs::create_dir_all(output_dir) {
-        eprintln!("Couldn't create dir for: {}, {:?}", output_file.display(), err);
+        eprintln!(
+            "Couldn't create dir for: {}, {:?}",
+            output_file.display(),
+            err
+        );
         return;
     }
     let mut file = match File::create(&output_file) {
         Ok(f) => f,
         Err(err) => {
-            eprintln!("Couldn't open output file: {}, {:?}", output_file.display(), err);
+            eprintln!(
+                "Couldn't open output file: {}, {:?}",
+                output_file.display(),
+                err
+            );
             return;
         }
     };
@@ -130,27 +142,14 @@ fn analyze_file(
             None => continue,
         };
 
-        visit(
-            &mut file,
-            "import",
-            &import.span,
-            &def.qualname,
-            None
-        )
+        visit(&mut file, "import", &import.span, &def.qualname, None)
     }
 
     for def in &file_analysis.defs {
-        let parent = def.parent.and_then(|parent_id| {
-            defs.get(&parent_id).map(|d| &*d.qualname)
-        });
+        let parent = def.parent
+            .and_then(|parent_id| defs.get(&parent_id).map(|d| &*d.qualname));
 
-        visit(
-            &mut file,
-            "def",
-            &def.span,
-            &def.qualname,
-            parent
-        )
+        visit(&mut file, "def", &def.span, &def.qualname, parent)
     }
 
     for ref_ in &file_analysis.refs {
@@ -210,7 +209,7 @@ fn main() {
         .args_from_usage(
             "<src>    'Points to the source root'
              <input>  'Points to the deps/save-analysis directory'
-             <output> 'Points to the directory where searchfox metadata should'"
+             <output> 'Points to the directory where searchfox metadata should'",
         )
         .get_matches();
 
@@ -221,11 +220,7 @@ fn main() {
     let loader = Loader::new(PathBuf::from(input_dir));
 
 
-    let crates = analysis::read_analysis_from_files(
-        &loader,
-        Default::default(),
-        &[],
-    );
+    let crates = analysis::read_analysis_from_files(&loader, Default::default(), &[]);
 
     let mut defs = HashMap::new();
     for krate in &crates {
