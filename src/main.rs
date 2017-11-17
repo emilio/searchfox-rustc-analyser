@@ -6,12 +6,36 @@ extern crate serde;
 #[macro_use]
 extern crate serde_json;
 
-mod loader;
-
-use loader::Loader;
+use analysis::{AnalysisHost, AnalysisLoader};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+
+#[derive(Clone)]
+pub struct Loader {
+    deps_dir: PathBuf,
+}
+
+impl Loader {
+    pub fn new(deps_dir: PathBuf) -> Self {
+        Self { deps_dir }
+    }
+}
+
+impl AnalysisLoader for Loader {
+    fn needs_hard_reload(&self, _: &Path) -> bool { true }
+
+    fn fresh_host(&self) -> AnalysisHost<Self> {
+        AnalysisHost::new_with_loader(self.clone())
+    }
+
+    fn set_path_prefix(&mut self, _: &Path) {}
+
+    fn abs_path_prefix(&self) -> Option<PathBuf> { None }
+    fn search_directories(&self) -> Vec<PathBuf> {
+        vec![self.deps_dir.clone()]
+    }
+}
 
 // Searchfox uses 1-indexed lines, 0-indexed columns.
 fn span_to_string(span: &data::SpanData) -> String {
